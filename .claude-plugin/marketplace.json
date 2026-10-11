@@ -68,6 +68,15 @@
       "skills": [
         "./skills/discernment-nudge"
       ]
+    },
+    {
+      "name": "android-apk",
+      "description": "Create, read, decompile, modify, rebuild, zipalign and sign Android APK files with Apktool, apksigner, jadx and androguard - no Android SDK required",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/android-apk"
+      ]
     }
   ]
 }
