@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>__APP_NAME__</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <div id="hud">
+    <div id="score">0</div>
+    <div id="hint">Tap the island</div>
+  </div>
+  <div id="lan">
+    <button data-act="host">Host</button>
+    <button data-act="find">Find</button>
+    <button data-act="ping">Ping</button>
+    <div id="lan-log"></div>
+  </div>
+  <!-- Classic scripts only: ES modules do not load from file:///android_asset. -->
+  <script>window.VC = window.VC || {};</script>
+  <script src="lib/three.min.js"></script>
+  <script src="js/voxel.js"></script>
+  <script src="js/net.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

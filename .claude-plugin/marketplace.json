@@ -68,6 +68,15 @@
       "skills": [
         "./skills/discernment-nudge"
       ]
+    },
+    {
+      "name": "android-webgl-game",
+      "description": "Build an Android game APK from HTML5/WebGL (three.js) without the Android SDK: WebView shell, LAN 1v1 multiplayer bridge, voxel renderer, headless two-player tests",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/android-webgl-game"
+      ]
     }
   ]
 }

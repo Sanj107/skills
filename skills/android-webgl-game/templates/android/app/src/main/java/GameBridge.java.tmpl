@@ -1,0 +1,471 @@
+package __PACKAGE__;
+
+import android.app.Activity;
+import android.content.Context;
+import android.net.wifi.WifiManager;
+import android.os.Build;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebView;
+
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.InterfaceAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * JavaScript interface exposed to the game as window.AndroidBridge.
+ *
+ * Besides small device helpers (vibration, a save backup file) it implements the
+ * local-network 1v1 link: one phone hosts a TCP server and announces itself with UDP
+ * broadcasts, the other discovers it (or types its IP) and connects. Messages are
+ * newline-delimited JSON strings; every network event reaches JS through
+ * window.VCNet.onNative(jsonString) on the UI thread.
+ */
+public class GameBridge {
+
+    static final int TCP_PORT = 47800;
+    static final int UDP_PORT = 47801;
+    static final String BEACON_TAG = "__BEACON__";
+    private static final Charset UTF8 = Charset.forName("UTF-8");
+
+    private final Activity activity;
+    private final WebView webView;
+    private final ExecutorService writer = Executors.newSingleThreadExecutor();
+
+    private volatile ServerSocket server;
+    private volatile Socket socket;
+    private volatile BufferedWriter out;
+    private volatile DatagramSocket discoverSocket;
+    private volatile boolean hosting;
+    private volatile String hostName = "Captain";
+    private volatile int session;
+    private WifiManager.MulticastLock multicastLock;
+
+    GameBridge(Activity activity, WebView webView) {
+        this.activity = activity;
+        this.webView = webView;
+    }
+
+    // ---------------------------------------------------------------- device helpers
+
+    @JavascriptInterface
+    public boolean isAndroid() {
+        return true;
+    }
+
+    @JavascriptInterface
+    @SuppressWarnings("deprecation")
+    public void vibrate(int ms) {
+        try {
+            Vibrator v = (Vibrator) activity.getSystemService(Context.VIBRATOR_SERVICE);
+            if (v == null || !v.hasVibrator()) {
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= 26) {
+                v.vibrate(VibrationEffect.createOneShot(Math.max(1, ms), VibrationEffect.DEFAULT_AMPLITUDE));
+            } else {
+                v.vibrate(Math.max(1, ms));
+            }
+        } catch (Exception ignored) {
+            // Vibration is cosmetic.
+        }
+    }
+
+    /** Mirrors the localStorage save into the app's private files as a fallback. */
+    @JavascriptInterface
+    public void saveBackup(String data) {
+        File tmp = new File(activity.getFilesDir(), "save.json.tmp");
+        File dst = new File(activity.getFilesDir(), "save.json");
+        FileOutputStream fos = null;
+        try {
+            fos = new FileOutputStream(tmp);
+            fos.write(data.getBytes(UTF8));
+            fos.getFD().sync();
+            fos.close();
+            fos = null;
+            if (!tmp.renameTo(dst)) {
+                dst.delete();
+                tmp.renameTo(dst);
+            }
+        } catch (IOException ignored) {
+            // The localStorage copy is still there.
+        } finally {
+            if (fos != null) {
+                try {
+                    fos.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    public String loadBackup() {
+        File f = new File(activity.getFilesDir(), "save.json");
+        if (!f.exists()) {
+            return "";
+        }
+        FileInputStream in = null;
+        try {
+            in = new FileInputStream(f);
+            byte[] buf = new byte[(int) f.length()];
+            int off = 0;
+            while (off < buf.length) {
+                int n = in.read(buf, off, buf.length - off);
+                if (n < 0) {
+                    break;
+                }
+                off += n;
+            }
+            return new String(buf, 0, off, UTF8);
+        } catch (IOException e) {
+            return "";
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    /** IPv4 addresses of this phone on Wi-Fi / hotspot interfaces, comma separated. */
+    @JavascriptInterface
+    public String getLocalIps() {
+        List<String> ips = new ArrayList<String>();
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) {
+                    continue;
+                }
+                for (InetAddress a : Collections.list(ni.getInetAddresses())) {
+                    if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
+                        ips.add(a.getHostAddress());
+                    }
+                }
+            }
+        } catch (SocketException ignored) {
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String ip : ips) {
+            if (sb.length() > 0) {
+                sb.append(',');
+            }
+            sb.append(ip);
+        }
+        return sb.toString();
+    }
+
+    // ---------------------------------------------------------------- LAN link
+
+    /** Starts hosting: a TCP server for one opponent plus UDP beacons so it can be found. */
+    @JavascriptInterface
+    public void lanHost(String name) {
+        lanClose();
+        hostName = name == null ? "Captain" : name.replace('|', ' ');
+        final int my = ++session;
+        hosting = true;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ServerSocket ss = new ServerSocket();
+                    ss.setReuseAddress(true);
+                    ss.bind(new InetSocketAddress(TCP_PORT));
+                    server = ss;
+                    emit("hosting", "ips", getLocalIps());
+                    startBeacon(my);
+                    Socket s = ss.accept();
+                    if (my != session) {
+                        s.close();
+                        return;
+                    }
+                    hosting = false;
+                    try {
+                        ss.close();
+                    } catch (IOException ignored) {
+                    }
+                    server = null;
+                    attach(s, my);
+                } catch (IOException e) {
+                    if (my == session) {
+                        hosting = false;
+                        emit("error", "message", "host: " + e.getMessage());
+                    }
+                }
+            }
+        }, "game-host").start();
+    }
+
+    private void startBeacon(final int my) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                DatagramSocket ds = null;
+                try {
+                    ds = new DatagramSocket();
+                    ds.setBroadcast(true);
+                    while (hosting && my == session) {
+                        byte[] msg = (BEACON_TAG + "|" + hostName + "|" + TCP_PORT).getBytes(UTF8);
+                        for (InetAddress target : broadcastTargets()) {
+                            try {
+                                ds.send(new DatagramPacket(msg, msg.length, target, UDP_PORT));
+                            } catch (IOException ignored) {
+                                // Some interfaces refuse broadcasts; the others still work.
+                            }
+                        }
+                        Thread.sleep(1000);
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    if (ds != null) {
+                        ds.close();
+                    }
+                }
+            }
+        }, "game-beacon").start();
+    }
+
+    private List<InetAddress> broadcastTargets() {
+        List<InetAddress> list = new ArrayList<InetAddress>();
+        try {
+            list.add(InetAddress.getByName("255.255.255.255"));
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) {
+                    continue;
+                }
+                for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                    InetAddress b = ia.getBroadcast();
+                    if (b != null && !list.contains(b)) {
+                        list.add(b);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return list;
+    }
+
+    /** Listens for host beacons; each one arrives in JS as a "found" event. */
+    @JavascriptInterface
+    public void lanDiscover(boolean on) {
+        DatagramSocket old = discoverSocket;
+        discoverSocket = null;
+        if (old != null) {
+            old.close();
+        }
+        releaseMulticast();
+        if (!on) {
+            return;
+        }
+        acquireMulticast();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                DatagramSocket ds = null;
+                try {
+                    ds = new DatagramSocket(null);
+                    ds.setReuseAddress(true);
+                    ds.setBroadcast(true);
+                    ds.bind(new InetSocketAddress(UDP_PORT));
+                    discoverSocket = ds;
+                    byte[] buf = new byte[512];
+                    while (discoverSocket == ds) {
+                        DatagramPacket p = new DatagramPacket(buf, buf.length);
+                        ds.receive(p);
+                        String text = new String(p.getData(), 0, p.getLength(), UTF8);
+                        String[] parts = text.split("\\|");
+                        if (parts.length >= 3 && BEACON_TAG.equals(parts[0])) {
+                            JSONObject o = new JSONObject();
+                            o.put("ev", "found");
+                            o.put("ip", p.getAddress().getHostAddress());
+                            o.put("name", parts[1]);
+                            o.put("port", parts[2]);
+                            emitRaw(o);
+                        }
+                    }
+                } catch (Exception e) {
+                    if (discoverSocket == ds && ds != null) {
+                        emit("error", "message", "discover: " + e.getMessage());
+                    }
+                } finally {
+                    if (ds != null) {
+                        ds.close();
+                    }
+                }
+            }
+        }, "game-discover").start();
+    }
+
+    @JavascriptInterface
+    public void lanConnect(final String ip) {
+        lanClose();
+        final int my = ++session;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Socket s = new Socket();
+                    s.connect(new InetSocketAddress(ip.trim(), TCP_PORT), 6000);
+                    if (my != session) {
+                        s.close();
+                        return;
+                    }
+                    attach(s, my);
+                } catch (IOException e) {
+                    if (my == session) {
+                        emit("error", "message", "connect: " + e.getMessage());
+                    }
+                }
+            }
+        }, "game-connect").start();
+    }
+
+    private void attach(final Socket s, final int my) throws IOException {
+        s.setTcpNoDelay(true);
+        s.setKeepAlive(true);
+        socket = s;
+        out = new BufferedWriter(new OutputStreamWriter(s.getOutputStream(), UTF8));
+        emit("connected", "ip", s.getInetAddress().getHostAddress());
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), UTF8));
+                    String line;
+                    while ((line = in.readLine()) != null) {
+                        emit("msg", "data", line);
+                    }
+                } catch (IOException ignored) {
+                } finally {
+                    if (my == session) {
+                        emit("closed", "ip", "");
+                    }
+                    try {
+                        s.close();
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
+        }, "game-reader").start();
+    }
+
+    @JavascriptInterface
+    public void lanSend(final String line) {
+        final BufferedWriter w = out;
+        if (w == null) {
+            return;
+        }
+        writer.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    w.write(line);
+                    w.write('\n');
+                    w.flush();
+                } catch (IOException ignored) {
+                    // The reader thread reports the disconnect.
+                }
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void lanClose() {
+        session++;
+        hosting = false;
+        ServerSocket ss = server;
+        server = null;
+        if (ss != null) {
+            try {
+                ss.close();
+            } catch (IOException ignored) {
+            }
+        }
+        Socket s = socket;
+        socket = null;
+        out = null;
+        if (s != null) {
+            try {
+                s.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    void shutdown() {
+        lanClose();
+        lanDiscover(false);
+        writer.shutdownNow();
+    }
+
+    // ---------------------------------------------------------------- plumbing
+
+    private void acquireMulticast() {
+        try {
+            WifiManager wm = (WifiManager) activity.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null && multicastLock == null) {
+                multicastLock = wm.createMulticastLock("game-discover");
+                multicastLock.setReferenceCounted(false);
+                multicastLock.acquire();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void releaseMulticast() {
+        try {
+            if (multicastLock != null) {
+                multicastLock.release();
+            }
+        } catch (Exception ignored) {
+        }
+        multicastLock = null;
+    }
+
+    private void emit(String ev, String key, String value) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ev", ev);
+            o.put(key, value);
+            emitRaw(o);
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void emitRaw(JSONObject o) {
+        final String js = "window.VCNet && VCNet.onNative(" + JSONObject.quote(o.toString()) + ")";
+        webView.post(new Runnable() {
+            @Override
+            public void run() {
+                webView.evaluateJavascript(js, null);
+            }
+        });
+    }
+}
