@@ -49,7 +49,7 @@ Bridge methods in the template: `vibrate(ms)`, `saveBackup(json)`/`loadBackup()`
 
 ## References — read the one you need
 
-- [reference/lan-multiplayer.md](reference/lan-multiplayer.md) — Wi-Fi/hotspot 1v1: discovery, framing, host-authoritative sync, protocol, rating, failure handling.
+- [reference/lan-multiplayer.md](reference/lan-multiplayer.md) — 1v1 over Wi-Fi/hotspot (discovery, framing) and over the internet via the bundled relay (`tools/relay_server.js`, room codes); host-authoritative sync, protocol, rating, failure handling.
 - [reference/voxel-rendering.md](reference/voxel-rendering.md) — voxel models and the culled/AO mesher, colours, camera framing on portrait phones, particles, performance budget.
 - [reference/game-systems.md](reference/game-systems.md) — clicker/idle economy formulas, offline income, prestige, story missions, a balance-simulation bot.
 - [reference/testing.md](reference/testing.md) — Playwright with SwiftShader WebGL, mobile emulation, two-tab multiplayer tests, full-campaign automation.

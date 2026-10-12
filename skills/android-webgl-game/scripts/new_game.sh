@@ -37,7 +37,7 @@ DIR="$(cd "$DIR" && pwd)"
 cp -R "$TPL/android" "$DIR/android"
 mkdir -p "$DIR/android/app/src/main/assets" "$DIR/tools" "$DIR/release"
 cp -R "$TPL/assets/." "$DIR/android/app/src/main/assets/"
-cp "$TPL/tools/build_apk.sh" "$TPL/tools/make_icons.py" "$DIR/tools/"
+cp "$TPL/tools/build_apk.sh" "$TPL/tools/make_icons.py" "$TPL/tools/relay_server.js" "$DIR/tools/"
 chmod +x "$DIR/tools/build_apk.sh" "$DIR/android/gradlew"
 
 # Fill placeholders and drop the .tmpl suffix.

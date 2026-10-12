@@ -100,6 +100,9 @@
   const N = VC.Net;
   N.on('hosting', o => log('Hosting… ' + (o.ips || '')));
   N.on('found', o => { log('Found ' + o.name + ' @ ' + o.ip + ' — connecting'); N.discover(false); N.connect(o.ip); });
+  // Internet play instead: run tools/relay_server.js somewhere and call
+  // N.onlineHost('ws://host:8080') (emits hosting{code}) / N.onlineJoin('ws://host:8080', code).
+  N.on('hosting', o => { if (o.code) log('Room code: ' + o.code); });
   N.on('connected', o => { log('Connected to ' + o.ip); N.send({ t: 'hello', coins: state.coins }); });
   N.on('msg', o => log('Peer says: ' + JSON.stringify(o.data)));
   N.on('closed', () => log('Disconnected'));

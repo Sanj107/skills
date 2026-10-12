@@ -1,4 +1,4 @@
-# LAN 1v1 multiplayer (Wi-Fi or hotspot, no internet, no server)
+# 1v1 multiplayer: LAN (Wi-Fi/hotspot) and online via a relay
 
 ## Transport (GameBridge.java, already in the template)
 
@@ -54,3 +54,17 @@ both:  emote {i}, bye
 Open the page in two tabs of one browser context. To give each tab its own save, namespace
 `localStorage` by `window.name` in an init script (see reference/testing.md). Assert both tabs
 report the same HP after a fight and opposite results at the end.
+
+## Online play through a relay (players on different networks)
+
+`templates/tools/relay_server.js` is a dependency-free Node WebSocket server (minimal RFC 6455:
+masked client frames, ping/pong, 64 KB frame cap) with 4-letter room codes:
+`{t:'create'}` → `{t:'room', code}`; `{t:'join', code}` → both get `{t:'paired'}`; then
+`{t:'relay', d}` is forwarded to the peer as `{t:'msg', d}`; a disconnect sends `{t:'peerleft'}`.
+The game protocol above runs unchanged on top — the relay never simulates anything.
+
+`net.js` exposes it as `Net.onlineHost(url)` / `Net.onlineJoin(url, code)` and emits the same
+events, so the duel code does not care which transport is active. `ws://` from the WebView needs
+`android:usesCleartextTraffic="true"` (already in the template manifest); prefer `wss://` behind a
+TLS proxy for public servers. Test locally: `node relay_server.js 8090` and point two tabs at
+`ws://localhost:8090`.
